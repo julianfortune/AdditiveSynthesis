@@ -6,17 +6,17 @@
 # description: Additive Synthesizer class
 #
 
-import math
 import numpy as np
 import matplotlib.pyplot as plt
 import wavio
 
 # Local dependencies
-from envelope import *
+import envelope
+import conversion
+import wavetable
 
-# Enum for different types of wave shapes
-class WaveShape():
-    sin = 0
+# TODO:
+# - Make sustain/early cut-off work for envelopes in oscillator
 
 class AdditiveSynthesizer():
 
@@ -25,105 +25,61 @@ class AdditiveSynthesizer():
 
     parameters = []
 
-    def __init__(self, wave=WaveShape.sin, waveTableLength=512, sampleRate=48000,
-        oscillators=1):
-        self.waveTable = createWaveTable(wave, waveTableLength)
+    def __init__(self, wave=wavetable.Shape.sin, waveTableLength=512,
+        sampleRate=48000, oscillators=1):
+        self.waveTable = wavetable.createWaveTable(wave, waveTableLength)
         self.sampleRate = sampleRate
 
         for _ in range(0, oscillators):
-            parameters.append([Envelope(), Envelope()])
+            self.parameters.append([envelope.Envelope(), envelope.Envelope()])
 
-    def generateSound(self, length):
-        return generateSoundFromWaveTable(waveTable,
-                                          parameters[0][0],
-                                          parameters[0][1],
-                                          sampleRate,
-                                          msToSamples(length, sampleRate))
+    def generateSound(self, duration):
+        lengthInSamples = conversion.msToSamples(duration, self.sampleRate)
 
-def createWaveTable(shape, sampleSize):
-    if shape == WaveShape.sin:
-        radiansPerSample = 2 * (math.pi) / sampleSize
-        radians = [sample * radiansPerSample for sample in range(0, sampleSize)]
+        sound = None
 
-        samples = np.sin(radians)
-        return samples
+        for oscillatorParameters in self.parameters:
+            frequencyEnvelope = oscillatorParameters[0].toArray(self.sampleRate)
+            amplitudeEnvelope = oscillatorParameters[1].toArray(self.sampleRate)
 
-# Returns the value for a floating point index to improve wavetable accuracy.
-# Uses basic linear interpolation.
-def interpolate(previousSample, followingSample, indexFloat):
-    return ((indexFloat - int(indexFloat)) * (followingSample - previousSample)
-            + previousSample)
+            frequencyEnvelope = envelope.trimOrStretch(frequencyEnvelope,
+                                                       lengthInSamples)
+            amplitudeEnvelope = envelope.trimOrStretch(amplitudeEnvelope,
+                                                       lengthInSamples)
 
-# Creates an array of length `sampleLength` representing the sound of a wave
-# table played back with a consant `frequency` or varying frequency based on a
-# list (also called `frequency` but with type list) recorded at sample rate
-# `sampleRate`.
-#
-# Reference: https://www.music.mcgill.ca/~gary/307/week4/wavetables.html
-def generateSoundFromWaveTable(waveTable, frequencyArray, amplitudeArray, sampleRate, sampleLength):
-    waveTableLength = len(waveTable)
+            samples = wavetable.generateSound(self.waveTable, frequencyEnvelope,
+                                              amplitudeEnvelope, self.sampleRate,
+                                              lengthInSamples)
 
-    samples = np.empty(sampleLength)
+            if sound is not None:
+                sound = np.add(sound, samples)
+            else:
+                sound = samples
 
-    phaseIncrements = (frequencyArray/sampleRate) * waveTableLength
-    phasePosition = 0
+        # Normalize (keep within range(-1,1))
+        # Source: https://stackoverflow.com/questions/1735025/how-
+        # to-normalize-a-numpy-array-to-within-a-certain-range
+        sound /= np.max(np.abs(sound), axis=0)
 
-    for sampleNumber in range(0, sampleLength):
-        phasePosition += phaseIncrements[sampleNumber]
-
-        if phasePosition >= waveTableLength:
-            phasePosition -= waveTableLength
-
-        previousIntegerIndex = int(phasePosition)
-        followingIntegerIndex = int(phasePosition) + 1
-
-        if followingIntegerIndex >= waveTableLength:
-            followingIntegerIndex -= waveTableLength
-
-        previousValue = waveTable[previousIntegerIndex]
-        followingValue = waveTable[followingIntegerIndex]
-
-        samples[sampleNumber] = interpolate(previousValue, followingValue,
-                                            phasePosition)
-
-    samples = np.multiply(samples, amplitudeArray)
-
-    return samples
-
-# Converts value in milliseconds (ms) to samples
-def msToSamples(valueInMS, sampleRate):
-    return int(valueInMS / 1000 * sampleRate)
+        return sound
 
 def main():
-    waveTable = createWaveTable(WaveShape.sin, 512)
+    synth = AdditiveSynthesizer()
 
-    sampleRate = 48000 # Samples per second
-    length = 200 # In milliseconds
+    osc1 = [envelope.Envelope(pointArray=[[0,400]]),
+            envelope.Envelope(pointArray=[[0,1], [400, 0]])]
+    osc2 = [envelope.Envelope(pointArray=[[0,800]]),
+            envelope.Envelope(pointArray=[[0,1], [200, 0]])]
+    osc3 = [envelope.Envelope(pointArray=[[0,1600]]),
+            envelope.Envelope(pointArray=[[0,1], [20, 0.3], [50, 0]])]
 
-    frequencyEnvelope = Envelope([[0, 3000],
-                                  [msToSamples(2, sampleRate), 200],
-                                  [msToSamples(20, sampleRate), 80],
-                                  [msToSamples(80, sampleRate), 60],
-                                  [msToSamples(100, sampleRate), 30]])
+    synth.parameters = [osc1, osc2, osc3]
+    sound = synth.generateSound(duration= 1000)
 
-    frequencyEnvelope.length = msToSamples(length, sampleRate)
+    wavio.write("test.wav", sound, synth.sampleRate, sampwidth=3)
 
-    amplitudeEnvelope = Envelope([[msToSamples(0.2, sampleRate), 1],
-                                  [msToSamples(90, sampleRate), 1]])
-
-    amplitudeEnvelope.length = msToSamples(length, sampleRate)
-
-    sound = generateSoundFromWaveTable(waveTable,
-                                      frequencyEnvelope.toArray(),
-                                      amplitudeEnvelope.toArray(),
-                                      sampleRate,
-                                      msToSamples(length,
-                                      sampleRate))
-
-    plt.plot(sound)
-    plt.show()
-
-    # wavio.write("test.wav", sound, sampleRate, sampwidth=3)
+    # plt.plot(sound)
+    # plt.show()
 
 if __name__ == "__main__":
     main()
